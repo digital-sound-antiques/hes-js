@@ -189,6 +189,18 @@ export class PSG {
   left = 0;
   right = 0;
 
+  /**
+   * True when the last {@link advance} moved the output.
+   *
+   * A channel stepping to the next entry of its waveform is not the same thing
+   * as the sound changing: neighbouring entries are often equal, a silent
+   * channel contributes nothing whatever it is playing, and most steps happen
+   * while the mix as a whole stands still. A caller that splits its work at
+   * every step does far more of it than the sound requires; this lets it split
+   * only where the sound really moves.
+   */
+  changed = false;
+
   constructor() {
     for (let i = 0; i < PSG_CHANNELS; i++) this.channels.push(new PSGChannel());
   }
@@ -279,6 +291,8 @@ export class PSG {
   }
 
   private updateOutput(): void {
+    const wasL = this.left;
+    const wasR = this.right;
     let l = 0;
     let r = 0;
     for (let i = 0; i < PSG_CHANNELS; i++) {
@@ -294,6 +308,7 @@ export class PSG {
     const scale = 1 / (CHANNEL_PEAK * PSG_CHANNELS);
     this.left = l * scale;
     this.right = r * scale;
+    this.changed = this.left !== wasL || this.right !== wasR;
   }
 
   setChannelMask(mask: number): void {

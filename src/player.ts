@@ -103,7 +103,6 @@ export interface ChannelStatus {
 class SideChain {
   cic = new CicDecimator();
   halfBand = new HalfBand();
-  halfBand2 = new HalfBand();
   resampler: Resampler;
   filter: NesFilter;
 
@@ -145,8 +144,7 @@ class SideChain {
       left -= take;
       for (let i = 0; i < n; i++) {
         if (!this.halfBand.push(cicOut[i])) continue;
-        if (!this.halfBand2.push(this.halfBand.value)) continue;
-        if (!resampler.push(this.halfBand2.value, audible)) continue;
+        if (!resampler.push(this.halfBand.value, audible)) continue;
         if (ready >= this.out.length) {
           const grown = new Float64Array(this.out.length * 2);
           grown.set(this.out);
@@ -162,7 +160,6 @@ class SideChain {
   clear(): void {
     this.cic.clear();
     this.halfBand.clear();
-    this.halfBand2.clear();
     this.resampler.clear();
     this.filter.clear();
   }
@@ -212,6 +209,9 @@ export class HESPlayer {
 
   /** Sub-clock remainders, so any advance can be split. */
   private psgRemainder = 0;
+  /** The level the run currently being accumulated carries. */
+  private heldLeft = 0;
+  private heldRight = 0;
 
   /** Output samples that hit the rails since the track started. */
   clippedSamples = 0;
@@ -260,9 +260,9 @@ export class HESPlayer {
     this.bus = new HESBus(file);
     this.cpu = new HuC6280(this.bus);
 
-    // Four stages down from the clock: the decimator, two half-bands, then the
+    // Three stages down from the clock: the decimator, one half-band, then the
     // windowed sinc to the host's rate.
-    const inRate = CLOCK / CIC_RATIO / 4;
+    const inRate = CLOCK / CIC_RATIO / 2;
     const room = Math.ceil(MAX_ADVANCE / CIC_RATIO) + 8;
     this.left = new SideChain(inRate, this.sampleRate, room);
     this.right = new SideChain(inRate, this.sampleRate, room);
@@ -284,6 +284,8 @@ export class HESPlayer {
     this.outputSample = 0;
     this.clock = 0;
     this.psgRemainder = 0;
+    this.heldLeft = 0;
+    this.heldRight = 0;
     this.clocksToVBlank = this.vblankPeriod;
     this.pendingCount = 0;
     this.pendingRead = 0;
@@ -403,12 +405,15 @@ export class HESPlayer {
       bus.raise(IRQ_VDC);
     }
 
-    // The span is broken at the PSG's own edges, so every run handed to the
-    // filters carries a value that really is constant for its whole length.
-    // Without this an instruction that outlasts several waveform steps would
-    // feed one level for all of them, and the sound would be whatever the last
-    // edge happened to leave behind.
+    // The span is broken where the sound actually moves, so every run handed to
+    // the filters carries a value that really is constant for its whole length.
+    //
+    // The PSG is asked when one of its channels next steps, but a step is only
+    // a candidate: most of them leave the mix exactly where it was, and the run
+    // is extended across those rather than cut. Only a step that moves the
+    // output ends a run - which, on this hardware, is a small fraction of them.
     let remaining = clocks;
+    let held = 0;
     while (remaining > 0) {
       const event = psg.cyclesToEvent();
       let step = remaining;
@@ -417,17 +422,35 @@ export class HESPlayer {
         if (untilEdge > 0 && untilEdge < step) step = untilEdge;
       }
 
-      // The output before this step is what the whole step carries.
-      this.feed(psg.left, psg.right, step, audible);
+      held += step;
+      remaining -= step;
+
+      // The mix's runs are cut only where the mix moves, but a single channel
+      // can move inside one of those runs - two of them can change and cancel
+      // out. So the waveform display is accumulated per step, before the step
+      // is taken, rather than per run.
+      if (this.channelCaptureEnabled) {
+        const acc = this.chAcc;
+        for (let c = 0; c < PSG_CHANNELS; c++) acc[c] += psg.channelOutput(c) * step;
+        this.chAccCount += step;
+      }
 
       this.psgRemainder += step;
       const psgClocks = (this.psgRemainder / PSG_DIVIDER) | 0;
       if (psgClocks > 0) {
         this.psgRemainder -= psgClocks * PSG_DIVIDER;
         psg.advance(psgClocks);
+        // The run just ended carried the level the PSG had before this step, so
+        // it is flushed here, after the step and before the new level is used.
+        if (psg.changed) {
+          this.feed(this.heldLeft, this.heldRight, held, audible);
+          held = 0;
+          this.heldLeft = psg.left;
+          this.heldRight = psg.right;
+        }
       }
-      remaining -= step;
     }
+    if (held > 0) this.feed(this.heldLeft, this.heldRight, held, audible);
 
     this.clock += clocks;
   }
@@ -436,12 +459,6 @@ export class HESPlayer {
   private feed(l: number, r: number, count: number, audible: boolean): void {
     if (count <= 0) return;
     const capture = this.channelCaptureEnabled;
-    if (capture) {
-      const psg = this.bus!.psg;
-      const acc = this.chAcc;
-      for (let c = 0; c < PSG_CHANNELS; c++) acc[c] += psg.channelOutput(c) * count;
-      this.chAccCount += count;
-    }
 
     // The two chains are fed the same run, so they produce the same number of
     // samples at the same instants.

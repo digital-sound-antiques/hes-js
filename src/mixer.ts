@@ -9,8 +9,17 @@
  * proper windowed-sinc resampler on the much slower stream that leaves.
  */
 
-/** Decimation factor of the first stage. */
-export const CIC_RATIO = 8;
+/**
+ * Decimation factor of the first stage.
+ *
+ * Chosen against this machine's clock: a third of the master 21.48 MHz is
+ * 7.16 MHz, and 32 brings that to 223.7 kHz - low enough that one half-band
+ * stage reaches the resampler's working rate, high enough that the second-order
+ * response still puts the worst fold-back 40 dB down. Halving it would buy
+ * 12 dB there and cost another half-band stage and twice the work in this one,
+ * which is the stage every clock passes through.
+ */
+export const CIC_RATIO = 32;
 
 /**
  * Two cascaded box filters, decimating by a power of two.
@@ -69,18 +78,48 @@ export class CicDecimator {
       this.lastX = x;
       this.sameRun = 0;
     }
-    const settled = this.r * 2;
+
     let n = 0;
-    while (count > 0 && this.sameRun < settled) {
-      if (this.push(x)) out[n++] = this.value;
+    const r = this.r;
+    const mask = this.mask;
+    const buf1 = this.buf1;
+    const buf2 = this.buf2;
+    const scale = 1 / (r * r);
+
+    // Held at one value long enough for both box filters to fill, every output
+    // is that value exactly, and the run can be finished with a division. Below
+    // that the filters are still remembering older samples, so their taps have
+    // to be walked - but even then the work is inlined here rather than paid as
+    // a call per sample, because at this hardware's event rate almost every run
+    // is a short one and this is the path they all take.
+    const settled = r * 2;
+    let left = count;
+    while (left > 0 && this.sameRun < settled) {
+      const i1 = this.i1;
+      this.sum1 += x - buf1[i1];
+      buf1[i1] = x;
+      this.i1 = (i1 + 1) & mask;
+
+      const s1 = this.sum1;
+      const i2 = this.i2;
+      this.sum2 += s1 - buf2[i2];
+      buf2[i2] = s1;
+      this.i2 = (i2 + 1) & mask;
+
       this.sameRun++;
-      count--;
+      left--;
+      if (++this.count >= r) {
+        this.count = 0;
+        this.value = this.sum2 * scale;
+        out[n++] = this.value;
+      }
     }
-    if (count > 0) {
-      const total = this.count + count;
-      const outs = (total / this.r) | 0;
-      this.count = total - outs * this.r;
-      this.sameRun += count;
+
+    if (left > 0) {
+      const total = this.count + left;
+      const outs = (total / r) | 0;
+      this.count = total - outs * r;
+      this.sameRun += left;
       for (let i = 0; i < outs; i++) out[n++] = x;
       if (outs > 0) this.value = x;
     }
