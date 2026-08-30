@@ -67,8 +67,8 @@ class PSGChannel {
   /** Noise mode, on the last two channels only. */
   noiseEnabled = false;
   noisePeriod = 0;
-  noiseTimer = 0;
-  /** Shift register; powers up holding one, as such things do. */
+  noiseTimer = 1;
+  /** Eighteen-bit shift register; powers up holding one. */
   lfsr = 1;
   noiseOut = 0;
 
@@ -77,7 +77,9 @@ class PSGChannel {
   /** Current sample, centred, -16..15. */
   get sample(): number {
     if (this.dda) return this.ddaSample - WAVE_CENTRE;
-    if (this.noiseEnabled) return this.noiseOut ? 15 : -16;
+    // Full scale either way, which is what makes noise the loudest thing the
+    // chip can do.
+    if (this.noiseEnabled) return this.noiseOut ? 31 - WAVE_CENTRE : -WAVE_CENTRE;
     return this.wave[this.phase] - WAVE_CENTRE;
   }
 
@@ -124,14 +126,22 @@ class PSGChannel {
     this.balanceRight = 0x0f - (v & 0x0f);
   }
 
+  /**
+   * Period of the noise divider, in PSG clocks.
+   *
+   * The five-bit register counts down from its complement, and the all-ones
+   * setting is not the longest period but a very short one - the two are not
+   * on the same scale at all.
+   */
+  private noiseDivider(): number {
+    const freq = 0x1f - (this.noisePeriod & 0x1f);
+    return freq === 0 ? 0x20 : freq << 6;
+  }
+
   /** CPU cycles until the waveform position could move, in PSG clocks. */
   eventIn(): number {
     if (!this.enabled || this.dda) return Infinity;
-    if (this.noiseEnabled) {
-      // Noise runs off its own divider, in units of 64 PSG clocks.
-      const period = (0x1f - this.noisePeriod) * 64;
-      return period > 0 ? this.noiseTimer + 1 : Infinity;
-    }
+    if (this.noiseEnabled) return this.noiseTimer;
     return this.timer + 1;
   }
 
@@ -140,17 +150,20 @@ class PSGChannel {
     if (!this.enabled || this.dda) return;
 
     if (this.noiseEnabled) {
-      const period = Math.max(1, (0x1f - this.noisePeriod) * 64);
-      let left = clocks;
-      while (left > this.noiseTimer) {
-        left -= this.noiseTimer + 1;
-        this.noiseTimer = period - 1;
-        // A 17-bit register tapped at bits 0 and 1, as on the real part.
-        const feedback = ((this.lfsr ^ (this.lfsr >> 1)) & 1) ^ 1;
-        this.lfsr = ((this.lfsr >> 1) | (feedback << 16)) & 0x1ffff;
+      const period = this.noiseDivider();
+      this.noiseTimer -= clocks;
+      while (this.noiseTimer <= 0) {
+        // Eighteen bits, tapped at 0, 1, 11, 12 and 17. Fewer taps than that -
+        // the two-tap register a shorter machine would use - gives a sequence
+        // so short that plain noise comes out sounding like the periodic kind.
+        const bit =
+          ((this.lfsr >> 0) ^ (this.lfsr >> 1) ^ (this.lfsr >> 11) ^ (this.lfsr >> 12) ^
+            (this.lfsr >> 17)) &
+          1;
+        this.lfsr = ((this.lfsr >>> 1) | (bit << 17)) & 0x3ffff;
         this.noiseOut = this.lfsr & 1;
+        this.noiseTimer += period;
       }
-      this.noiseTimer -= left;
       return;
     }
 
@@ -239,6 +252,7 @@ export class PSG {
         if (ch != null && this.selected >= FIRST_NOISE_CHANNEL) {
           ch.noiseEnabled = (v & 0x80) !== 0;
           ch.noisePeriod = v & 0x1f;
+          if (ch.noiseTimer <= 0) ch.noiseTimer = 1;
         }
         break;
       }
