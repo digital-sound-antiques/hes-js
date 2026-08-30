@@ -49,16 +49,24 @@ export class HESBus implements HuC6280Bus {
   /** Bank selected by each of the eight mapping registers. */
   readonly mpr = new Uint8Array(8);
 
-  /** The file's image, as 8 KB banks, and which of them exist. */
-  private banks: (Uint8Array | null)[] = new Array(256).fill(null);
-  /** Read as zero; stands in for a bank the file never provided. */
-  private readonly voidBank = new Uint8Array(PAGE_SIZE);
+  /**
+   * The file's image, as 8 KB banks, and a bank read as zero for the ones it
+   * never provided.
+   *
+   * Genuinely private, so a state snapshot walking this object does not carry a
+   * copy of the whole file: the image is read-only here - the CPU's writes to
+   * it are lost, as they are to the cartridge - so there is nothing in it a
+   * snapshot needs.
+   */
+  readonly #banks: (Uint8Array | null)[] = new Array(256).fill(null);
+  readonly #voidBank = new Uint8Array(PAGE_SIZE);
 
   // --- timer ---
   timerReload = 0;
   timerValue = 0;
   timerRunning = false;
-  private timerCycles = 0;
+  /** Clocks accumulated towards the next tick of the prescaler. */
+  timerClocks = 0;
 
   // --- interrupt controller ---
   /** 1 = that source is masked off. */
@@ -73,10 +81,10 @@ export class HESBus implements HuC6280Bus {
       for (let i = 0; i < block.data.length; i++) {
         const physical = block.physicalAddress + i;
         const bank = (physical >> 13) & 0xff;
-        let page = this.banks[bank];
+        let page = this.#banks[bank];
         if (page == null) {
           page = new Uint8Array(PAGE_SIZE);
-          this.banks[bank] = page;
+          this.#banks[bank] = page;
         }
         page[physical & 0x1fff] = block.data[i];
       }
@@ -90,7 +98,7 @@ export class HESBus implements HuC6280Bus {
     this.timerReload = 0;
     this.timerValue = 0;
     this.timerRunning = false;
-    this.timerCycles = 0;
+    this.timerClocks = 0;
     this.irqDisable = 0;
     this.irqPending = 0;
   }
@@ -116,7 +124,7 @@ export class HESBus implements HuC6280Bus {
     const offset = addr & 0x1fff;
     if (bank === RAM_BANK) return this.ram[offset];
     if (bank === HARDWARE_BANK) return this.readHardware(offset);
-    return (this.banks[bank] ?? this.voidBank)[offset];
+    return (this.#banks[bank] ?? this.#voidBank)[offset];
   }
 
   write(addr: number, value: number): void {
@@ -172,7 +180,7 @@ export class HESBus implements HuC6280Bus {
           // register only takes effect at the next underflow.
           if (running && !this.timerRunning) {
             this.timerValue = this.timerReload;
-            this.timerCycles = 0;
+            this.timerClocks = 0;
           }
           this.timerRunning = running;
         }
@@ -194,9 +202,9 @@ export class HESBus implements HuC6280Bus {
   /** Advance the timer by `clocks` master clocks, raising its interrupt on underflow. */
   advanceTimer(clocks: number): void {
     if (!this.timerRunning) return;
-    this.timerCycles += clocks;
-    while (this.timerCycles >= TIMER_PRESCALE) {
-      this.timerCycles -= TIMER_PRESCALE;
+    this.timerClocks += clocks;
+    while (this.timerClocks >= TIMER_PRESCALE) {
+      this.timerClocks -= TIMER_PRESCALE;
       if (this.timerValue === 0) {
         this.timerValue = this.timerReload;
         this.irqPending |= IRQ_TIMER;
@@ -209,7 +217,7 @@ export class HESBus implements HuC6280Bus {
   /** Clocks until the timer next underflows, or Infinity while it is stopped. */
   timerEventIn(): number {
     if (!this.timerRunning) return Infinity;
-    return (this.timerValue + 1) * TIMER_PRESCALE - this.timerCycles;
+    return (this.timerValue + 1) * TIMER_PRESCALE - this.timerClocks;
   }
 
   /** Raise an interrupt from outside, as the display's vertical blank does. */

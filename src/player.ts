@@ -58,20 +58,37 @@ export interface HESPlayerOptions {
   defaultFadeSeconds?: number;
 }
 
+/**
+ * A complete, transferable player snapshot.
+ *
+ * The machine's own parts are carried as walked object graphs rather than as
+ * lists of named fields. Enumerating them by hand is how a snapshot ends up
+ * missing one - a prescaler's remainder, a held sample - and the symptom of
+ * that is a seek which sounds almost right, which is far harder to notice than
+ * one that fails outright.
+ */
 export interface HESPlayerState {
   cpu: HuC6280State;
-  psg: unknown;
-  ram: Uint8Array;
-  mpr: Uint8Array;
-  timer: { reload: number; value: number; running: boolean };
-  irq: { disable: number; pending: number };
-  cpuIdle: boolean;
-  clocksToVBlank: number;
-  outputSample: number;
-  clock: number;
+  bus: unknown;
   left: unknown;
   right: unknown;
+  cpuIdle: boolean;
+  clocksToVBlank: number;
+  psgRemainder: number;
+  heldLeft: number;
+  heldRight: number;
+  outputSample: number;
+  clock: number;
   channelHp: Float64Array;
+  /**
+   * Samples the machine had produced but not yet handed out.
+   *
+   * Part of the state, not scratch: a snapshot taken mid-buffer and restored
+   * without these resumes a fraction of a sample early, and every later sample
+   * is then computed from a machine that is slightly out of step with the
+   * filters. It is a small error that never goes away.
+   */
+  pending: { left: Float64Array; right: Float64Array; read: number };
 }
 
 export interface ChannelStatus {
@@ -698,44 +715,49 @@ export class HESPlayer {
   // -------------------------------------------------------------------- state
 
   saveState(): HESPlayerState {
-    const bus = this.bus!;
     return {
       cpu: this.cpu!.saveState(),
-      psg: snapshot(bus.psg),
-      ram: bus.ram.slice(),
-      mpr: bus.mpr.slice(),
-      timer: { reload: bus.timerReload, value: bus.timerValue, running: bus.timerRunning },
-      irq: { disable: bus.irqDisable, pending: bus.irqPending },
-      cpuIdle: this.cpuIdle,
-      clocksToVBlank: this.clocksToVBlank,
-      outputSample: this.outputSample,
-      clock: this.clock,
+      bus: snapshot(this.bus),
       left: snapshot(this.left),
       right: snapshot(this.right),
+      cpuIdle: this.cpuIdle,
+      clocksToVBlank: this.clocksToVBlank,
+      psgRemainder: this.psgRemainder,
+      heldLeft: this.heldLeft,
+      heldRight: this.heldRight,
+      outputSample: this.outputSample,
+      clock: this.clock,
       channelHp: this.channelHp.slice(),
+      pending: {
+        left: this.pendingL.slice(this.pendingRead, this.pendingCount),
+        right: this.pendingR.slice(this.pendingRead, this.pendingCount),
+        read: 0,
+      },
     };
   }
 
   restoreState(state: HESPlayerState): void {
-    const bus = this.bus!;
     this.cpu!.loadState(state.cpu);
-    restore(bus.psg, state.psg);
-    bus.ram.set(state.ram);
-    bus.mpr.set(state.mpr);
-    bus.timerReload = state.timer.reload;
-    bus.timerValue = state.timer.value;
-    bus.timerRunning = state.timer.running;
-    bus.irqDisable = state.irq.disable;
-    bus.irqPending = state.irq.pending;
-    this.cpuIdle = state.cpuIdle;
-    this.clocksToVBlank = state.clocksToVBlank;
-    this.outputSample = state.outputSample;
-    this.clock = state.clock;
+    restore(this.bus, state.bus);
     restore(this.left, state.left);
     restore(this.right, state.right);
+    this.cpuIdle = state.cpuIdle;
+    this.clocksToVBlank = state.clocksToVBlank;
+    this.psgRemainder = state.psgRemainder;
+    this.heldLeft = state.heldLeft;
+    this.heldRight = state.heldRight;
+    this.outputSample = state.outputSample;
+    this.clock = state.clock;
     this.channelHp.set(state.channelHp);
-    this.pendingCount = 0;
-    this.pendingRead = 0;
+    const held = state.pending.left.length;
+    if (held > this.pendingL.length) {
+      this.pendingL = new Float64Array(held);
+      this.pendingR = new Float64Array(held);
+    }
+    this.pendingL.set(state.pending.left);
+    this.pendingR.set(state.pending.right);
+    this.pendingCount = held;
+    this.pendingRead = state.pending.read;
     this.chAccReset();
   }
 }
