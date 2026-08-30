@@ -229,6 +229,8 @@ export class HESPlayer {
   /** The level the run currently being accumulated carries. */
   private heldLeft = 0;
   private heldRight = 0;
+  /** Each channel's most recent level, for the waveform display. */
+  private heldChannels = new Float64Array(PSG_CHANNELS);
 
   /** Output samples that hit the rails since the track started. */
   clippedSamples = 0;
@@ -303,6 +305,7 @@ export class HESPlayer {
     this.psgRemainder = 0;
     this.heldLeft = 0;
     this.heldRight = 0;
+    this.heldChannels.fill(0);
     this.clocksToVBlank = this.vblankPeriod;
     this.pendingCount = 0;
     this.pendingRead = 0;
@@ -450,6 +453,10 @@ export class HESPlayer {
         const acc = this.chAcc;
         for (let c = 0; c < PSG_CHANNELS; c++) acc[c] += psg.channelOutput(c) * step;
         this.chAccCount += step;
+        // What the levels were at the end of this step, for the samples the
+        // averaging has nothing left to give.
+        const held = this.heldChannels;
+        for (let c = 0; c < PSG_CHANNELS; c++) held[c] = psg.channelOutput(c);
       }
 
       this.psgRemainder += step;
@@ -524,10 +531,16 @@ export class HESPlayer {
       this.channelCaptureBuffer = grown;
     }
     const at = this.channelCaptureCount * PSG_CHANNELS;
-    const n = this.chAccCount || 1;
+    const n = this.chAccCount;
     const coef = this.chHpCoef;
     for (let c = 0; c < PSG_CHANNELS; c++) {
-      const raw = this.chAcc[c] / n;
+      // One advance can cross several sample instants, and the machine is only
+      // stepped between them - so the second and later samples of one advance
+      // find the accumulator empty. Averaging what was accumulated would read
+      // those as silence, which draws as a trace snapping to zero between every
+      // pair of real points. With nothing new to average, the level the
+      // channel actually holds is the honest answer.
+      const raw = n > 0 ? this.chAcc[c] / n : this.heldChannels[c];
       this.channelHp[c] = coef * this.channelHp[c] + (1 - coef) * raw;
       const v = (raw - this.channelHp[c]) * 24000;
       this.channelCaptureBuffer[at + c] = v > 32767 ? 32767 : v < -32768 ? -32768 : v | 0;
