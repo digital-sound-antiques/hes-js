@@ -1,0 +1,43 @@
+{
+  "name": "hes-js",
+  "version": "0.1.0-dev.0",
+  "description": "PC Engine / TurboGrafx-16 sound file (.hes) player library for JavaScript",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "README.md",
+    "package.json",
+    "LICENSE.md",
+    "dist"
+  ],
+  "scripts": {
+    "prepare": "npm run build",
+    "clean": "rimraf dist",
+    "build": "tsc",
+    "build:watch": "tsc -w",
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "pc-engine",
+    "turbografx",
+    "hes",
+    "huc6280",
+    "psg",
+    "chiptune",
+    "audio"
+  ],
+  "author": "Mitsutaka Okazaki",
+  "license": "ISC",
+  "devDependencies": {
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  }
+}

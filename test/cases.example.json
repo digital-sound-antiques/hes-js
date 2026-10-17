@@ -1,0 +1,5 @@
+[
+  { "name": "hes-1", "path": "/path/to/a-file.hes", "track": 0, "seconds": 6, "rate": 44100 },
+  { "name": "hes-1-48k", "path": "/path/to/a-file.hes", "track": 0, "seconds": 3, "rate": 48000 },
+  { "name": "hes-2", "path": "/path/to/another-file.hes", "track": 38, "seconds": 6, "rate": 44100 }
+]

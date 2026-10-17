@@ -1,0 +1,4 @@
+node_modules/
+dist/
+*.wav
+test/*.local.json
